@@ -379,7 +379,7 @@ def _play_metrics(g):
     mins, goals = g["minutes"].sum(), g["goals"].sum()
     cards = g["yellow_cards"].sum() + g["red_cards"].sum()
     cidx = g["yellow_cards"].sum() + 2 * g["red_cards"].sum()
-    s = g["match_score"].dropna()
+    s = g["match_score"].dropna() if "match_score" in g.columns else pd.Series([], dtype=float)
     forma = ((s.tail(5).mean() - s.mean()) / s.mean()) if len(s) >= 3 and s.mean() else np.nan
     return pd.Series({"min_play": mins, "mecze_play": g["match_id"].nunique(), "gole_play": goals,
                       "kartki_play": cards, "score_play": s.mean() if len(s) else np.nan,
@@ -391,7 +391,7 @@ def _play_metrics(g):
 
 def _total_metrics(g):
     mins, goals = g["minutes"].sum(), g["goals"].sum()
-    s = g["match_score"].dropna()
+    s = g["match_score"].dropna() if "match_score" in g.columns else pd.Series([], dtype=float)
     lead = (g.groupby("league_name")["minutes"].sum().idxmax()
             if g["minutes"].sum() > 0 and g["league_name"].notna().any() else None)
     return pd.Series({"min_total": mins, "mecze_total": g["match_id"].nunique(),
