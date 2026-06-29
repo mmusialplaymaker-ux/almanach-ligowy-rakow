@@ -797,29 +797,31 @@ def main():
             st.markdown(_intro)
 
     # ---- FILTRY ----
-    FILTER_KEYS = ["f_zaw", "f_klub", "f_rozgr", "f_liga", "f_woj",
-                   "f_score", "f_min", "f_mecz", "f_kart", "f_up", "f_kad", "f_sen", "f_clj"]
+    # Reset przez "nonce": po wyczyszczeniu zmieniamy klucze widżetów, więc wszystkie
+    # (także suwaki) startują od wartości domyślnych — to pewniejsze niż pop+rerun.
+    _fn = st.session_state.get("_filter_nonce", 0)
+    def K(base):
+        return f"{base}_{_fn}"
     with st.container(border=True):
         ch = st.columns([6, 1])
         ch[0].markdown("**Filtry**")
-        if ch[1].button("Wyczyść filtry", use_container_width=True):
-            for _k in FILTER_KEYS:
-                st.session_state.pop(_k, None)
+        if ch[1].button("🧹 Wyczyść filtry", use_container_width=True, type="primary"):
+            st.session_state["_filter_nonce"] = _fn + 1
             st.rerun()
         has_region = "region_name" in data.columns and data["region_name"].notna().any()
         if has_region:
             rr = st.columns([2, 6])
             f_reg = rr[0].multiselect("Województwo",
-                                      sorted(data["region_name"].dropna().unique()), key="f_woj")
+                                      sorted(data["region_name"].dropna().unique()), key=K("f_woj"))
         else:
             f_reg = []
         r1 = st.columns([2, 2, 2])
-        q = r1[0].text_input(f"{L['player_one']} (imię/nazwisko)", "", key="f_zaw")
-        f_club = r1[1].multiselect("Klub", sorted(data["club_name"].dropna().unique()), key="f_klub")
+        q = r1[0].text_input(f"{L['player_one']} (imię/nazwisko)", "", key=K("f_zaw"))
+        f_club = r1[1].multiselect("Klub", sorted(data["club_name"].dropna().unique()), key=K("f_klub"))
         f_lg = r1[2].multiselect(f"Rozgrywki (gdziekolwiek {L['played']})",
-                                 sorted({x for s in data["_leagues"].dropna() for x in s}), key="f_rozgr")
+                                 sorted({x for s in data["_leagues"].dropna() for x in s}), key=K("f_rozgr"))
         f_pl = st.multiselect(f"Liga (gdziekolwiek {L['played']})",
-                              sorted({x for s in data["_plays"].dropna() for x in s}), key="f_liga")
+                              sorted({x for s in data["_plays"].dropna() for x in s}), key=K("f_liga"))
         r2 = st.columns(4)
         def rng(col, label, c, key, integer=False):
             lo, hi = float(np.nanmin(data[col])), float(np.nanmax(data[col]))
@@ -831,15 +833,15 @@ def main():
                     return (lo, hi)
                 return c.slider(label, lo, hi, (lo, hi), step=1, key=key)
             return c.slider(label, lo, hi, (lo, hi), key=key)
-        s_score = rng("pm_score", "Score (liga)", r2[0], "f_score")
-        s_min = rng("min_play", "Minuty (liga)", r2[1], "f_min", integer=True)
-        s_mecz = rng("mecze_play", "Mecze (liga)", r2[2], "f_mecz", integer=True)
-        s_kart = rng("kartki_total", "Kartki total", r2[3], "f_kart", integer=True)
+        s_score = rng("pm_score", "Score (liga)", r2[0], K("f_score"))
+        s_min = rng("min_play", "Minuty (liga)", r2[1], K("f_min"), integer=True)
+        s_mecz = rng("mecze_play", "Mecze (liga)", r2[2], K("f_mecz"), integer=True)
+        s_kart = rng("kartki_total", "Kartki total", r2[3], K("f_kart"), integer=True)
         r3 = st.columns(4)
-        f_up = r3[0].checkbox("↑ Gra ze starszymi", key="f_up")
-        f_kad = r3[1].checkbox("🪑 W kadrze seniorów", key="f_kad")
-        f_sen = r3[2].checkbox("⚽ Minuty w seniorach", key="f_sen")
-        f_clj = r3[3].checkbox("🏅 Minuty w CLJ", key="f_clj")
+        f_up = r3[0].checkbox("↑ Gra ze starszymi", key=K("f_up"))
+        f_kad = r3[1].checkbox("🪑 W kadrze seniorów", key=K("f_kad"))
+        f_sen = r3[2].checkbox("⚽ Minuty w seniorach", key=K("f_sen"))
+        f_clj = r3[3].checkbox("🏅 Minuty w CLJ", key=K("f_clj"))
 
     # ---- FILTROWANIE ----
     f = data.copy()
