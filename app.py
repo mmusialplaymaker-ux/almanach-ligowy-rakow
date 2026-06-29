@@ -821,15 +821,20 @@ def main():
         f_pl = st.multiselect(f"Liga (gdziekolwiek {L['played']})",
                               sorted({x for s in data["_plays"].dropna() for x in s}), key="f_liga")
         r2 = st.columns(4)
-        def rng(col, label, c, key):
+        def rng(col, label, c, key, integer=False):
             lo, hi = float(np.nanmin(data[col])), float(np.nanmax(data[col]))
             if not np.isfinite(lo) or lo == hi:
                 return (lo, hi)
+            if integer:
+                lo, hi = int(np.floor(lo)), int(np.ceil(hi))
+                if lo == hi:
+                    return (lo, hi)
+                return c.slider(label, lo, hi, (lo, hi), step=1, key=key)
             return c.slider(label, lo, hi, (lo, hi), key=key)
         s_score = rng("pm_score", "Score (liga)", r2[0], "f_score")
-        s_min = rng("min_play", "Minuty (liga)", r2[1], "f_min")
-        s_mecz = rng("mecze_play", "Mecze (liga)", r2[2], "f_mecz")
-        s_kart = rng("kartki_total", "Kartki total", r2[3], "f_kart")
+        s_min = rng("min_play", "Minuty (liga)", r2[1], "f_min", integer=True)
+        s_mecz = rng("mecze_play", "Mecze (liga)", r2[2], "f_mecz", integer=True)
+        s_kart = rng("kartki_total", "Kartki total", r2[3], "f_kart", integer=True)
         r3 = st.columns(4)
         f_up = r3[0].checkbox("↑ Gra ze starszymi", key="f_up")
         f_kad = r3[1].checkbox("🪑 W kadrze seniorów", key="f_kad")
