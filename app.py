@@ -55,6 +55,25 @@ PM_WEIGHTS = {"Jakość": 0.55, "Forma": 0.10, "Dostępność": 0.20, "Konsekwen
 # DefaultSegmentFactorCalculator.ts. Dla młodzieży leagueMultiplier bierzemy z rank_p (v7),
 # bo produkcyjnie KAŻDA kategoria (A1/B1/C1...) ma płaski multiplier ~0.08 niezależnie od poziomu.
 PM_SCORE_MODE = _secret("PM_SCORE_MODE", "v7")   # 'v7' (realny score) lub 'prod' (stary match_score)
+# Zakres rankowania jakości: 'selected' (domyślnie — w obrębie wybranej ligi, dla klubów)
+# albo 'total' (ze WSZYSTKICH meczów sezonu — dla raportów "grali w starszych/w górę").
+QUALITY_SCOPE = (_secret("PM_QUALITY_SCOPE", "selected") or "selected").lower()
+
+# Tryb rankingu: 'standard' (PM Index jak dotąd) albo 'talent' (mix dla raportów "grali w górę":
+# jakość league-aware + poziom [CLJ/seniorzy/skok 2+ roczniki] + wolumen). Wagi strojone sekretami.
+PM_RANK_MODE = (_secret("PM_RANK_MODE", "standard") or "standard").lower()
+def _fnum(key, dflt):
+    try:
+        v = _secret(key, "")
+        return float(v) if v not in ("", None) else float(dflt)
+    except Exception:
+        return float(dflt)
+W_JAKOSC = _fnum("PM_W_JAKOSC", 0.45)    # waga jakości (league-aware)
+W_POZIOM = _fnum("PM_W_POZIOM", 0.45)    # waga poziomu (CLJ/seniorzy/duży skok)
+W_WOLUMEN = _fnum("PM_W_WOLUMEN", 0.10)  # waga wolumenu (minuty łącznie)
+W_CLJ = _fnum("PM_W_CLJ", 1.0)           # w "poziomie": waga minut CLJ
+W_SENIOR = _fnum("PM_W_SENIOR", 0.8)     # w "poziomie": waga minut w seniorach
+W_SKOK = _fnum("PM_W_SKOK", 0.6)         # w "poziomie": waga minut 2+ roczniki w górę
 
 AGE_IMPACT = 0.35
 AGE_CONST = 0.816496580927726
@@ -158,6 +177,27 @@ def _rank_p_series(df):
         uniq = {u: _detect_rank_p(u) for u in df.loc[miss, "play_name"].astype(str).unique()}
         rp = rp.where(~miss, df.loc[miss, "play_name"].astype(str).map(uniq))
     return pd.to_numeric(rp, errors="coerce")
+
+
+_CAT_AGE_PATS = [(r'(^A1$|U-?19)', 19), (r'(^A2$|U-?18)', 18), (r'(^B1$|U-?17)', 17),
+                 (r'(^B2$|U-?16)', 16), (r'(^C1$|U-?15)', 15), (r'(^C2$|U-?14)', 14),
+                 (r'(^D1$|U-?13)', 13), (r'(^D2$|U-?12)', 12)]
+
+
+def _cat_age(name):
+    """Poziom wiekowy rozgrywek z nazwy ligi: A1=19 … D2=12, senior=20, junior nieznany=NaN."""
+    n = str(name)
+    for pat, v in _CAT_AGE_PATS:
+        if re.search(pat, n, re.I):
+            return v
+    if (re.search(r'^(A1|A2|B1|B2|C1|C2|D1|D2)$', n, re.I) or n.upper().startswith("CLJ")
+            or re.search(r'U-?1[0-9]', n, re.I)):
+        return np.nan
+    return 20
+
+
+def _cat_age_series(df):
+    return df["league_name"].map(_cat_age)
 
 
 def compute_pm_score(df):
@@ -427,8 +467,15 @@ def build(_stats, _matches):
     mn = mn_all[pl.index]
     den = mn.groupby(pl["player_id"]).sum().replace(0, np.nan)
     df["pm_score"] = df["player_id"].map((pl["_sc"] * mn).groupby(pl["player_id"]).sum() / den)
-    df["pm_quality"] = df["player_id"].map((pl["_sp"] * mn).groupby(pl["player_id"]).sum() / den)
-    df["rank_p_avg"] = df["player_id"].map((pl["_rank_p"] * mn).groupby(pl["player_id"]).sum() / den).round(1)
+
+    # Zakres rankowania jakości: 'selected' = wybrana liga (kluby); 'total' = wszystkie mecze
+    # sezonu (raporty "grali w górę" — inaczej zawodnicy grający głównie wyżej mają pustą jakość).
+    if QUALITY_SCOPE == "total" or PM_RANK_MODE == "talent":
+        qf, qmn, qden = mall, mn_all, den_t
+    else:
+        qf, qmn, qden = pl, mn, den
+    df["pm_quality"] = df["player_id"].map((qf["_sp"] * qmn).groupby(qf["player_id"]).sum() / qden)
+    df["rank_p_avg"] = df["player_id"].map((qf["_rank_p"] * qmn).groupby(qf["player_id"]).sum() / qden).round(1)
 
     # Forma/Konsekwencja ze stats_part per mecz (gęste, league-aware)
     def _form(gp):
@@ -436,7 +483,7 @@ def build(_stats, _matches):
         m = x.mean()
         return pd.Series({"_forma_px": ((x.tail(5).mean() - m) / m) if len(x) >= 3 and m else np.nan,
                           "_kons_px": (1 / (1 + x.std(ddof=0))) if len(x) >= 2 else np.nan})
-    pform = pl.groupby("player_id").apply(_form)
+    pform = qf.groupby("player_id").apply(_form)
     df["_forma_px"] = df["player_id"].map(pform["_forma_px"])
     df["_kons_px"] = df["player_id"].map(pform["_kons_px"])
 
@@ -449,15 +496,16 @@ def build(_stats, _matches):
         df["Jakość"] = df["score_play"].rank(pct=True)
         df["Forma"] = df["forma"].rank(pct=True)
         df["Konsekwencja"] = df["konsekwencja"].rank(pct=True)
-    df["Dostępność"] = df["min_play"].rank(pct=True)
+    df["Dostępność"] = (df["min_total"] if (QUALITY_SCOPE == "total" or PM_RANK_MODE == "talent")
+                        else df["min_play"]).rank(pct=True)
     df["Dyscyplina"] = (-df["kartki_per90"]).rank(pct=True)
-    df["PM_base"] = sum(df[a].fillna(0) * w for a, w in PM_WEIGHTS.items())
+    # premia kontekstowa (kolumna „Premia”; w trybie standard wchodzi do PM Index)
     sm = df["senior_minutes"].fillna(0)
     sq = df["senior_squad_apps"].fillna(0)
     df["PM_premia"] = (df["gra_ze_starszymi"].fillna(False).astype(bool).astype(float) * B_UP
                        + (sm > 0).astype(float) * B_SEN_PLAYED
                        + ((sm == 0) & (sq > 0)).astype(float) * B_SEN_SQUAD)
-    df["PM_Index"] = df["PM_base"] + df["PM_premia"]
+
     lg = _matches.groupby("player_id")["league_name"].agg(lambda s: set(s.dropna()))
     pp = _matches.groupby("player_id")["play_name"].agg(lambda s: set(s.dropna()))
     df["_leagues"] = df["player_id"].map(lg)
@@ -467,6 +515,31 @@ def build(_stats, _matches):
                                  regex=True, na=False)]
     cljm = clj.groupby("player_id")["minutes"].sum()
     df["clj_minutes"] = df["player_id"].map(cljm).fillna(0)
+
+    # minuty "2+ roczniki w górę" (duży skok) — sygnał poziomu w trybie talent
+    mall["_ca"] = _cat_age_series(mall)
+    _by = df.drop_duplicates("player_id").set_index("player_id")["est_birth_year"]
+    own2 = mall["player_id"].map((2026 - _by) + 2)
+    up2_mask = mall["_ca"].notna() & own2.notna() & (mall["_ca"] >= own2) & (mn_all > 0)
+    up2 = mn_all.where(up2_mask, 0).groupby(mall["player_id"]).sum()
+    df["up2_min"] = df["player_id"].map(up2).fillna(0)
+
+    if PM_RANK_MODE == "talent":
+        # mix: jakość (league-aware) + poziom (CLJ/seniorzy/skok) + wolumen
+        Q = df["pm_quality"].rank(pct=True)
+        lvl_raw = (df["clj_minutes"].fillna(0) * W_CLJ
+                   + df["senior_minutes"].fillna(0) * W_SENIOR
+                   + df["up2_min"].fillna(0) * W_SKOK)
+        df["Poziom"] = lvl_raw.rank(pct=True)
+        Vol = df["min_total"].fillna(0).rank(pct=True)
+        wsum = (W_JAKOSC + W_POZIOM + W_WOLUMEN) or 1.0
+        df["PM_base"] = (W_JAKOSC * Q + W_POZIOM * df["Poziom"] + W_WOLUMEN * Vol) / wsum
+        # poziom/wolumen już zawierają sygnał "w górę" → bez podwójnego liczenia premii
+        df["PM_Index"] = df["PM_base"]
+    else:
+        df["PM_base"] = sum(df[a].fillna(0) * w for a, w in PM_WEIGHTS.items())
+        df["PM_Index"] = df["PM_base"] + df["PM_premia"]
+
     ry = _matches["match_date"].dt.year.max()
     df["_ref_year"] = int(ry) if pd.notna(ry) else 2026
     return df
