@@ -544,7 +544,10 @@ def build(_stats, _matches):
     df["clj_minutes"] = df["player_id"].map(cljm).fillna(0)
 
     # minuty zagrane "w górę" (w starszej dywizji) — sygnał poziomu w trybie talent
-    up2 = mn_all.where(jun_older, 0).groupby(mall["player_id"]).sum()
+    # minuty "w górę" WAŻONE liczbą roczników skoku: +1 też się liczy (×1),
+    # ale realny skok waży więcej (+2 ×2, +3 ×3). Sygnał poziomu w trybie talent.
+    up_w = (mn_all * (py - mall["_maxy"])).where(jun_older, 0)
+    up2 = up_w.groupby(mall["player_id"]).sum()
     df["up2_min"] = df["player_id"].map(up2).fillna(0)
 
     if PM_RANK_MODE == "talent":
