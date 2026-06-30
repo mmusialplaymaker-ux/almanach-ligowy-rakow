@@ -179,25 +179,31 @@ def _rank_p_series(df):
     return pd.to_numeric(rp, errors="coerce")
 
 
-_CAT_AGE_PATS = [(r'(^A1$|U-?19)', 19), (r'(^A2$|U-?18)', 18), (r'(^B1$|U-?17)', 17),
-                 (r'(^B2$|U-?16)', 16), (r'(^C1$|U-?15)', 15), (r'(^C2$|U-?14)', 14),
-                 (r'(^D1$|U-?13)', 13), (r'(^D2$|U-?12)', 12)]
+# Sezon 25/26 (PZPN): każda dywizja ma JEDEN najstarszy dopuszczalny rocznik (max wiek).
+# Młodszy może grać w każdej starszej; "za stary" nie zagra niżej. Gra w dywizji o
+# starszym max-roczniku niż własny = "gra ze starszymi".
+_CAT_MAXYEAR_PATS = [
+    (r'(^A1$|U-?19)', 2006), (r'(^A2$|U-?18)', 2007),
+    (r'(^B1$|U-?17)', 2008), (r'(^B2$|U-?16)', 2009),
+    (r'(^C1$|U-?15)', 2010), (r'(^C2$|U-?14)', 2011),
+    (r'(^D1$|U-?13)', 2012), (r'(^D2$|U-?12)', 2013),
+    (r'(^E1$|U-?11)', 2014), (r'(^E2$|U-?10)', 2015),
+    (r'(^F1$|U-?9)', 2016),  (r'(^F2$|U-?8)', 2017),
+]
 
 
-def _cat_age(name):
-    """Poziom wiekowy rozgrywek z nazwy ligi: A1=19 … D2=12, senior=20, junior nieznany=NaN."""
+def _cat_max_year(name):
+    """Najstarszy dopuszczalny rocznik dla dywizji (sezon 25/26). CLJ U-1x wg numeru.
+    Senior / nieznane juniorskie -> NaN (nie liczymy jako 'w górę')."""
     n = str(name)
-    for pat, v in _CAT_AGE_PATS:
+    for pat, y in _CAT_MAXYEAR_PATS:
         if re.search(pat, n, re.I):
-            return v
-    if (re.search(r'^(A1|A2|B1|B2|C1|C2|D1|D2)$', n, re.I) or n.upper().startswith("CLJ")
-            or re.search(r'U-?1[0-9]', n, re.I)):
-        return np.nan
-    return 20
+            return y
+    return np.nan
 
 
-def _cat_age_series(df):
-    return df["league_name"].map(_cat_age)
+def _cat_maxyear_series(df):
+    return df["league_name"].map(_cat_max_year)
 
 
 def compute_pm_score(df):
@@ -504,16 +510,16 @@ def build(_stats, _matches):
     df["Dostępność"] = (df["min_total"] if (QUALITY_SCOPE == "total" or PM_RANK_MODE == "talent")
                         else df["min_play"]).rank(pct=True)
     df["Dyscyplina"] = (-df["kartki_per90"]).rank(pct=True)
-    # --- poprawna "gra ze starszymi": kategoria wiekowa meczu vs własna (z rocznika).
-    #     CLJ U-15=15 (=C1), U-17=17 (=B1), U-19=19 (=A1) — ten sam wiek to NIE "starsi".
-    #     Starsi = wyższa kategoria juniorska niż własna LUB seniorzy. ---
-    mall["_ca"] = _cat_age_series(mall)
+    # --- "gra ze starszymi": gra w dywizji o STARSZYM max-roczniku niż własny rocznik.
+    #     Np. 2011 (własna C2/U-14) w C1/U-15 = +1, w B1/U-17 = +3. Uprawnienie nie chroni —
+    #     młodszy zawsze "gra w górę". Seniorzy osobno (znacznik ⚽). ---
+    mall["_maxy"] = _cat_maxyear_series(mall)
     _by = df.drop_duplicates("player_id").set_index("player_id")["est_birth_year"]
-    own_ca = mall["player_id"].map(2026 - _by)
-    diff = mall["_ca"] - own_ca
+    py = mall["player_id"].map(_by)                      # rocznik zawodnika (per mecz)
     played = mn_all > 0
-    jun_older = played & mall["_ca"].notna() & (mall["_ca"] <= 19) & (diff >= 1)
-    rwg = diff.where(jun_older).groupby(mall["player_id"]).max()
+    jun_older = played & mall["_maxy"].notna() & py.notna() & (py > mall["_maxy"])
+    nyrs = (py - mall["_maxy"]).where(jun_older)         # o ile roczników wyżej
+    rwg = nyrs.groupby(mall["player_id"]).max()
     df["roczniki_w_gore"] = df["player_id"].map(rwg)
     has_jun_older = jun_older.groupby(mall["player_id"]).any()
     df["_jun_older"] = df["player_id"].map(has_jun_older).fillna(False).astype(bool)
@@ -521,7 +527,8 @@ def build(_stats, _matches):
     # premia kontekstowa (kolumna „Premia”; w trybie standard wchodzi do PM Index)
     sm = df["senior_minutes"].fillna(0)
     sq = df["senior_squad_apps"].fillna(0)
-    df["gra_ze_starszymi"] = (df["_jun_older"] | (sm > 0)).astype(bool)
+    # "↑ ze starszymi" = TYLKO starsza dywizja juniorska. Seniorzy -> osobny znacznik ⚽.
+    df["gra_ze_starszymi"] = df["_jun_older"].astype(bool)
     df["PM_premia"] = (df["gra_ze_starszymi"].astype(float) * B_UP
                        + (sm > 0).astype(float) * B_SEN_PLAYED
                        + ((sm == 0) & (sq > 0)).astype(float) * B_SEN_SQUAD)
@@ -536,10 +543,8 @@ def build(_stats, _matches):
     cljm = clj.groupby("player_id")["minutes"].sum()
     df["clj_minutes"] = df["player_id"].map(cljm).fillna(0)
 
-    # minuty "2+ roczniki w górę" (duży skok) — sygnał poziomu w trybie talent
-    own2 = mall["player_id"].map((2026 - _by) + 2)
-    up2_mask = mall["_ca"].notna() & own2.notna() & (mall["_ca"] >= own2) & (mn_all > 0)
-    up2 = mn_all.where(up2_mask, 0).groupby(mall["player_id"]).sum()
+    # minuty zagrane "w górę" (w starszej dywizji) — sygnał poziomu w trybie talent
+    up2 = mn_all.where(jun_older, 0).groupby(mall["player_id"]).sum()
     df["up2_min"] = df["player_id"].map(up2).fillna(0)
 
     if PM_RANK_MODE == "talent":
@@ -567,7 +572,8 @@ def badges_html(r):
     out = []
     if bool(r.get("gra_ze_starszymi")):
         n = r.get("roczniki_w_gore")
-        lbl = f"↑ ze starszymi (+{int(n)})" if pd.notna(n) and n and n >= 1 else "↑ ze starszymi"
+        lbl = (f"↑ ze starszymi (+{int(n)})" if pd.notna(n) and n and n >= 1
+               else "↑ ze starszymi")
         out.append(f'<span class="b up">{lbl}</span>')
     sm = r.get("senior_minutes") or 0
     if sm > 0:
