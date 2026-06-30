@@ -269,14 +269,19 @@ PM_HELP = (
 CSS = """
 <style>
 .pmrow{display:flex;gap:12px;overflow-x:auto;padding:4px 2px 12px;}
-.pmcard{flex:0 0 232px;border:1px solid #2b3340;border-radius:12px;padding:12px 14px;
-        background:#191f29;}
-.pmcard h4{margin:0 0 2px;font-size:15px;color:#e8edf4;}
-.pmcard .sub{font-size:12px;color:#9aa7b6;margin-bottom:8px;line-height:1.4;min-height:30px;}
+.pmcard{border:1px solid #2b3340;border-radius:12px;padding:12px 14px;width:100%;
+        background:#191f29;box-sizing:border-box;}
+/* tylko rząd zawierający karty przewija się w bok; kolumny stałej szerokości */
+div[data-testid="stHorizontalBlock"]:has(.pmcard){overflow-x:auto !important;flex-wrap:nowrap !important;padding-bottom:6px;}
+div[data-testid="stHorizontalBlock"]:has(.pmcard) > div[data-testid="column"],
+div[data-testid="stHorizontalBlock"]:has(.pmcard) > div[data-testid="stColumn"]{
+        flex:0 0 224px !important;min-width:224px !important;width:224px !important;}
+.pmcard h4{margin:0 0 2px;font-size:15px;color:#e8edf4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pmcard .sub{font-size:12px;color:#9aa7b6;margin-bottom:8px;line-height:1.4;height:34px;overflow:hidden;}
 .pmcard .pm{font-size:22px;font-weight:700;color:#5db0ff;}
 .pmcard .pmlbl{font-size:10px;color:#8a97a6;letter-spacing:.5px;text-transform:uppercase;}
 .pmcard .row{font-size:12px;color:#c4cdd8;margin-top:6px;}
-.pmcard .badges{margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;}
+.pmcard .badges{margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;align-content:flex-start;min-height:72px;}
 .b{font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600;white-space:nowrap;}
 .b.up{background:#2a2150;color:#c4b5fd;}
 .b.sen{background:#16361f;color:#7ee2a0;}
@@ -499,10 +504,25 @@ def build(_stats, _matches):
     df["Dostępność"] = (df["min_total"] if (QUALITY_SCOPE == "total" or PM_RANK_MODE == "talent")
                         else df["min_play"]).rank(pct=True)
     df["Dyscyplina"] = (-df["kartki_per90"]).rank(pct=True)
+    # --- poprawna "gra ze starszymi": kategoria wiekowa meczu vs własna (z rocznika).
+    #     CLJ U-15=15 (=C1), U-17=17 (=B1), U-19=19 (=A1) — ten sam wiek to NIE "starsi".
+    #     Starsi = wyższa kategoria juniorska niż własna LUB seniorzy. ---
+    mall["_ca"] = _cat_age_series(mall)
+    _by = df.drop_duplicates("player_id").set_index("player_id")["est_birth_year"]
+    own_ca = mall["player_id"].map(2026 - _by)
+    diff = mall["_ca"] - own_ca
+    played = mn_all > 0
+    jun_older = played & mall["_ca"].notna() & (mall["_ca"] <= 19) & (diff >= 1)
+    rwg = diff.where(jun_older).groupby(mall["player_id"]).max()
+    df["roczniki_w_gore"] = df["player_id"].map(rwg)
+    has_jun_older = jun_older.groupby(mall["player_id"]).any()
+    df["_jun_older"] = df["player_id"].map(has_jun_older).fillna(False).astype(bool)
+
     # premia kontekstowa (kolumna „Premia”; w trybie standard wchodzi do PM Index)
     sm = df["senior_minutes"].fillna(0)
     sq = df["senior_squad_apps"].fillna(0)
-    df["PM_premia"] = (df["gra_ze_starszymi"].fillna(False).astype(bool).astype(float) * B_UP
+    df["gra_ze_starszymi"] = (df["_jun_older"] | (sm > 0)).astype(bool)
+    df["PM_premia"] = (df["gra_ze_starszymi"].astype(float) * B_UP
                        + (sm > 0).astype(float) * B_SEN_PLAYED
                        + ((sm == 0) & (sq > 0)).astype(float) * B_SEN_SQUAD)
 
@@ -517,8 +537,6 @@ def build(_stats, _matches):
     df["clj_minutes"] = df["player_id"].map(cljm).fillna(0)
 
     # minuty "2+ roczniki w górę" (duży skok) — sygnał poziomu w trybie talent
-    mall["_ca"] = _cat_age_series(mall)
-    _by = df.drop_duplicates("player_id").set_index("player_id")["est_birth_year"]
     own2 = mall["player_id"].map((2026 - _by) + 2)
     up2_mask = mall["_ca"].notna() & own2.notna() & (mall["_ca"] >= own2) & (mn_all > 0)
     up2 = mn_all.where(up2_mask, 0).groupby(mall["player_id"]).sum()
@@ -619,22 +637,18 @@ def _i(x):
         return 0
 
 
-def cards_html(top):
-    cards = []
-    for _, r in top.iterrows():
-        by = r.get("est_birth_year")
-        age = f"{int(r['_ref_year'] - by)} lat" if pd.notna(by) else "—"
-        rok = f"rocznik {int(by)}" if pd.notna(by) else ""
-        klub = r.get("club_name") or r.get("team_name") or "—"
-        lead = r.get("liga_wiodaca") or r.get("league_name") or "—"
-        cards.append(
-            f'<div class="pmcard"><h4>{r["zawodnik"]}</h4>'
+def _card_html(r):
+    by = r.get("est_birth_year")
+    age = f"{int(r['_ref_year'] - by)} lat" if pd.notna(by) else "—"
+    rok = f"rocznik {int(by)}" if pd.notna(by) else ""
+    klub = r.get("club_name") or r.get("team_name") or "—"
+    lead = r.get("liga_wiodaca") or r.get("league_name") or "—"
+    return (f'<div class="pmcard"><h4>{r["zawodnik"]}</h4>'
             f'<div class="sub">{klub}<br>liga wiodąca: {lead}</div>'
             f'<div class="pmlbl">PM Index</div><div class="pm">{r["PM_Index"]:.2f}</div>'
             f'<div class="row">{rok} · {age}</div>'
             f'<div class="row">{_i(r.get("min_total"))} min · {_i(r.get("mecze_total"))} meczów (sezon)</div>'
             f'<div class="badges">{badges_html(r)}</div></div>')
-    return '<div class="pmrow">' + "".join(cards) + "</div>"
 
 
 # --------------------------------------------------------------------------- #
@@ -868,10 +882,19 @@ def main():
         f = f[f["clj_minutes"].fillna(0) > 0]
     f = f.sort_values("PM_Index", ascending=False).reset_index(drop=True)
 
-    # ---- KARTY TOPOWYCH (scroll w bok) ----
+    # ---- KARTY TOPOWYCH (jeden rząd, przewijany w bok; natywny wybór — lekki rerun) ----
     st.markdown(f"### 🏅 {L['top_players']}")
     if len(f):
-        st.markdown(cards_html(f.head(15)), unsafe_allow_html=True)
+        topcards = f.head(15).reset_index(drop=True)
+        cols = st.columns(len(topcards))
+        for j in range(len(topcards)):
+            r = topcards.iloc[j]
+            with cols[j]:
+                st.markdown(_card_html(r), unsafe_allow_html=True)
+                if st.button("Wybierz", key=f"card_{r['player_id']}",
+                             use_container_width=True):
+                    st.session_state["sel_pid"] = r["player_id"]
+                    st.rerun()
     else:
         st.info(L["no_players"])
 
@@ -907,6 +930,10 @@ def main():
         elif (r.get("senior_squad_apps") or 0) > 0: z.append("🪑")
         if (r.get("clj_minutes") or 0) > 0: z.append("🏅")
         return " ".join(z)
+    # wybór z karty ma priorytet (przycisk ustawia st.session_state["sel_pid"] — lekki rerun)
+    sel_card = st.session_state.get("sel_pid")
+    sel_card = sel_card if (sel_card and (f["player_id"] == sel_card).any()) else None
+
     ft = f.copy()
     ft["Znaczniki"] = ft.apply(znaczniki, axis=1)
     cmap = {"zawodnik": L["player_one"], "Znaczniki": "Znaczniki", "region_name": "Województwo",
@@ -919,10 +946,26 @@ def main():
             "gole_play": "Gole (liga)", "gole_total": "Gole (total)",
             "kartki_total": "Kartki", "senior_minutes": "Min. seniorzy",
             "clj_minutes": "Min. CLJ"}
-    disp = ft[[c for c in cmap if c in ft.columns]].rename(columns=cmap)
+
+    if sel_card:
+        who = f.loc[f["player_id"] == sel_card, "zawodnik"].iloc[0]
+        cc = st.columns([6, 2])
+        cc[0].success(f"Wybrany zawodnik: **{who}** — analityka i mecze zawężone do niego.")
+        if cc[1].button("← Pokaż wszystkich", use_container_width=True):
+            st.session_state.pop("sel_pid", None)
+            st.rerun()
+        ftab = ft[ft["player_id"] == sel_card]
+        sel_pid = sel_card
+        select_mode = "ignore"
+    else:
+        ftab = ft
+        sel_pid = None
+        select_mode = "rerun"
+
+    disp = ftab[[c for c in cmap if c in ftab.columns]].rename(columns=cmap)
     event = st.dataframe(
         disp, use_container_width=True, height=430, hide_index=True,
-        on_select="rerun", selection_mode="single-row",
+        on_select=select_mode, selection_mode="single-row",
         column_config={
             "PM Index": st.column_config.NumberColumn(format="%.2f", help=PM_HELP),
             "Score (liga)": st.column_config.NumberColumn(format="%.3f",
@@ -937,7 +980,8 @@ def main():
             "Znaczniki": st.column_config.TextColumn(
                 help="↑ gra ze starszymi · 🪑 w kadrze seniorów · ⚽ minuty w seniorach · 🏅 minuty w CLJ")})
 
-    sel_pid = f.iloc[event.selection.rows[0]]["player_id"] if event.selection.rows else None
+    if sel_pid is None and event.selection.rows:
+        sel_pid = ftab.iloc[event.selection.rows[0]]["player_id"]
 
     # ---- MECZE ----
     if sel_pid:
